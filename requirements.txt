@@ -1,0 +1,11 @@
+websocket-client
+pandas
+numpy
+torch
+python-binance
+scikit-learn
+joblib
+uvicorn
+fastapi
+aiofiles
+nest-asyncio
