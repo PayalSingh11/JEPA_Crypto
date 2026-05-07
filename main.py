@@ -17,9 +17,10 @@ from typing import List, Dict, Any
 from src.crypto_trading_pipeline import (
     compute_rsi, compute_macd, compute_bollinger_width, compute_rolling_volatility,
     BinanceWebSocketClient, RealTimeProcessor, JEPAModel, MPCModule, RealTimeFeatureBuffer,
-    TradingActionLogger
+    TradingActionLogger, compute_features_from_klines
 )
 from src.portfolio import PortfolioManager, RiskManager
+from binance.client import Client
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -195,6 +196,49 @@ def initialize_trading_system(selected_symbol: str = "BTCUSDT"):
 
         processor = RealTimeProcessor(symbol, ADV_minute, ADVOL_minute, scaler, callback=on_new_features)
         binance_client = BinanceWebSocketClient(symbol, processor)
+        
+        # --- Pre-fill Logic ---
+        try:
+            logger.info("Pre-filling feature buffer with historical data...")
+            client = Client()
+            klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "100 minutes ago UTC")
+            
+            processor.price_buffer = [float(k[4]) for k in klines[-26:]]
+            processor.minute_prices = [float(k[4]) for k in klines[-26:]]
+            
+            df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time',
+                                               'quote_asset_volume', 'number_of_trades', 'taker_buy_base',
+                                               'taker_buy_quote', 'ignore'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            df = df.astype(float)
+            
+            features_df = compute_features_from_klines(df, ADV_minute, ADVOL_minute)
+            
+            features_df_normalized = pd.DataFrame(
+                scaler.transform(features_df),
+                columns=features_df.columns,
+                index=features_df.index
+            )
+            
+            for i in range(len(features_df_normalized) - 60, len(features_df_normalized)):
+                row = features_df_normalized.iloc[i].to_dict()
+                timestamp = features_df.index[i]
+                row['close_price'] = df.iloc[i]['close']
+                row['timestamp'] = timestamp
+                
+                feature_buffer.add_feature(row)
+                price_history.append({
+                    'timestamp': timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp),
+                    'price': row['close_price']
+                })
+                if len(price_history) > 1000:
+                    price_history.pop(0)
+                    
+            logger.info(f"Successfully pre-filled buffer with {len(feature_buffer.buffer)} states.")
+        except Exception as e:
+            logger.error(f"Error pre-filling data: {e}")
+            
         binance_client.connect()
 
         initialized = True
